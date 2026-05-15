@@ -16,16 +16,21 @@
 }:
 let
   pname = "claude-desktop";
-  version = "1.569.0";
+  version = "1.7196.1";
 
+  # Anthropic stopped serving the Squirrel .exe wrapper at predictable URLs
+  # for newer versions; the .nupkg is now hosted directly under
+  # AnthropicClaude-${version}-full.nupkg. We wrap it back into a zip in the
+  # buildPhase so the upstream build.sh (which expects a Squirrel exe) keeps
+  # working unchanged.
   srcs = {
     x86_64-linux = fetchurl {
-      url = "https://downloads.claude.ai/releases/win32/x64/${version}/Claude-49894ad878c985b0dd77178b75b353f11481ebf4.exe";
-      hash = "sha256-NNbINx7IpfV8aQGSsTS7pkQzEDvs0lTygFhzjvQDHO0=";
+      url = "https://downloads.claude.ai/releases/win32/x64/AnthropicClaude-${version}-full.nupkg";
+      hash = "sha256-boov362Wm4i+uxT+ABYcvXfykPTQ1Cu9FXhBCvaoIH0=";
     };
     aarch64-linux = fetchurl {
-      url = "https://downloads.claude.ai/releases/win32/arm64/${version}/Claude-49894ad878c985b0dd77178b75b353f11481ebf4.exe";
-      hash = "sha256-/ZEQ/hE94Dm3n31pPZqaZg5Uz8LGrxIP9APgcxWye/M=";
+      url = "https://downloads.claude.ai/releases/win32/arm64/AnthropicClaude-${version}-full.nupkg";
+      hash = lib.fakeHash;
     };
   };
 
@@ -81,8 +86,15 @@ stdenvNoCC.mkDerivation {
 
     export HOME=$TMPDIR
 
-    # Copy exe to a writable location for build.sh
-    cp $src Claude-Setup.exe
+    # build.sh expects a Squirrel .exe whose 7z extraction yields a
+    # top-level AnthropicClaude-*.nupkg. Anthropic now ships the .nupkg
+    # directly, so we wrap it in a tarball (zip-in-zip wrapping with 7z
+    # auto-merges contents — tar avoids that). 7z auto-detects the tar
+    # format on extraction, so Claude-Setup.exe being a tar is fine.
+    mkdir -p nupkg-wrapper
+    cp $src nupkg-wrapper/AnthropicClaude-${version}-full.nupkg
+    ( cd nupkg-wrapper && tar -cf ../Claude-Setup.exe \
+        AnthropicClaude-${version}-full.nupkg )
 
     # Run build.sh — handles extraction, patching, icon extraction, asar repacking
     # sourceRoot points to the flake repo (contains scripts/)

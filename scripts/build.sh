@@ -1378,6 +1378,25 @@ if (serviceErrorIdx !== -1) {
     }
 }
 
+// ============================================================
+// Patch 8: Spoof anthropic-client-os-platform header to win32
+// Server-side Cowork gate rejects non-Windows clients regardless
+// of local MSIX patches. Override the header value sent on every
+// API request. Anchor: literal header name (unique).
+// ============================================================
+const osHeaderRe = /(\w+)\.set\("anthropic-client-os-platform",\s*\w+\)/g;
+let osHeaderMatches = 0;
+code = code.replace(osHeaderRe, (match, headerVar) => {
+    osHeaderMatches++;
+    return `${headerVar}.set("anthropic-client-os-platform","win32")`;
+});
+if (osHeaderMatches > 0) {
+    console.log(`  Patched anthropic-client-os-platform to win32 (${osHeaderMatches} call site${osHeaderMatches > 1 ? 's' : ''})`);
+    patchCount++;
+} else {
+    console.log('  WARNING: Could not find anthropic-client-os-platform header set call');
+}
+
 fs.writeFileSync(indexJs, code);
 console.log(`  Applied ${patchCount} cowork patches`);
 if (patchCount < 5) {
