@@ -811,31 +811,35 @@ patch_tray_menu_handler() {
 	echo 'Patching tray menu handler...'
 	local index_js='app.asar.contents/.vite/build/index.js'
 
-	local tray_func tray_var first_const
+	local js_ident='[$A-Za-z_][$0-9A-Za-z_]*'
+	local tray_func tray_func_re tray_var tray_var_re first_const
 	tray_func=$(grep -oP \
-		'on\("menuBarEnabled",\(\)=>\{\K\w+(?=\(\)\})' "$index_js")
+		"on\(\"menuBarEnabled\",\(\)=>\{\K${js_ident}(?=\(\)\})" \
+		"$index_js" | head -1)
 	if [[ -z $tray_func ]]; then
 		echo 'Failed to extract tray menu function name' >&2
 		cd "$project_root" || exit 1
 		exit 1
 	fi
+	tray_func_re=$(printf '%s' "$tray_func" | sed 's/[][\\.^$*+?{}()|/]/\\&/g')
 	echo "  Found tray function: $tray_func"
 
 	tray_var=$(grep -oP \
-		"\}\);let \K\w+(?==null;(?:async )?function ${tray_func})" \
-		"$index_js")
+		"\}\);let \K${js_ident}(?==null;(?:async )?function ${tray_func_re})" \
+		"$index_js" | head -1)
 	if [[ -z $tray_var ]]; then
 		echo 'Failed to extract tray variable name' >&2
 		cd "$project_root" || exit 1
 		exit 1
 	fi
+	tray_var_re=$(printf '%s' "$tray_var" | sed 's/[][\\.^$*+?{}()|/]/\\&/g')
 	echo "  Found tray variable: $tray_var"
 
-	sed -i "s/function ${tray_func}(){/async function ${tray_func}(){/g" \
+	sed -i "s/function ${tray_func_re}(){/async function ${tray_func}(){/g" \
 		"$index_js"
 
 	first_const=$(grep -oP \
-		"async function ${tray_func}\(\)\{.*?const \K\w+(?==)" \
+		"async function ${tray_func_re}\(\)\{.*?const \K${js_ident}(?==)" \
 		"$index_js" | head -1)
 	if [[ -z $first_const ]]; then
 		echo 'Failed to extract first const in function' >&2
@@ -845,16 +849,15 @@ patch_tray_menu_handler() {
 	echo "  Found first const variable: $first_const"
 
 	# Add mutex guard to prevent concurrent tray rebuilds
-	if ! grep -q "${tray_func}._running" "$index_js"; then
-		sed -i "s/async function ${tray_func}(){/async function ${tray_func}(){if(${tray_func}._running)return;${tray_func}._running=true;setTimeout(()=>${tray_func}._running=false,1500);/g" \
+	if ! grep -qF "${tray_func}._running" "$index_js"; then
+		sed -i "s/async function ${tray_func_re}(){/async function ${tray_func}(){if(${tray_func}._running)return;${tray_func}._running=true;setTimeout(()=>${tray_func}._running=false,1500);/g" \
 			"$index_js"
 		echo "  Added mutex guard to ${tray_func}()"
 	fi
 
 	# Add DBus cleanup delay after tray destroy
-	if ! grep -q "await new Promise.*setTimeout" "$index_js" \
-		| grep -q "$tray_var"; then
-		sed -i "s/${tray_var}\&\&(${tray_var}\.destroy(),${tray_var}=null)/${tray_var}\&\&(${tray_var}.destroy(),${tray_var}=null,await new Promise(r=>setTimeout(r,250)))/g" \
+	if ! grep -qF "${tray_var}.destroy(),${tray_var}=null,await new Promise" "$index_js"; then
+		sed -i "s/${tray_var_re}&&(${tray_var_re}\.destroy(),${tray_var_re}=null)/${tray_var}\&\&(${tray_var}.destroy(),${tray_var}=null,await new Promise(r=>setTimeout(r,250)))/g" \
 			"$index_js"
 		echo "  Added DBus cleanup delay after $tray_var.destroy()"
 	fi
@@ -869,7 +872,7 @@ patch_tray_menu_handler() {
 			"s/(${electron_var_re}\.nativeTheme\.on\(\s*\"updated\"\s*,\s*\(\)\s*=>\s*\{)/let _trayStartTime=Date.now();\1/g" \
 			"$index_js"
 		sed -i -E \
-			"s/\((\w+\([^)]*\))\s*,\s*${tray_func}\(\)\s*,/(\1,Date.now()-_trayStartTime>3e3\&\&${tray_func}(),/g" \
+			"s/\((\w+\([^)]*\))\s*,\s*${tray_func_re}\(\)\s*,/(\1,Date.now()-_trayStartTime>3e3\&\&${tray_func}(),/g" \
 			"$index_js"
 		echo '  Added startup delay check (3 second window)'
 	fi
