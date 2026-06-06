@@ -824,8 +824,12 @@ patch_tray_menu_handler() {
 	tray_func_re=$(printf '%s' "$tray_func" | sed 's/[][\\.^$*+?{}()|/]/\\&/g')
 	echo "  Found tray function: $tray_func"
 
+	# The tray var is whatever gets assigned `new <electron>.Tray(...)`.
+	# Older bundles declared it as `});let <var>=null;function <trayFunc>`,
+	# but newer ones use a multi-var `let a=null,b=null;` before a different
+	# helper, so anchor on the Tray constructor instead (stable across versions).
 	tray_var=$(grep -oP \
-		"\}\);let \K${js_ident}(?==null;(?:async )?function ${tray_func_re})" \
+		"${js_ident}(?==new ${electron_var_re}\.Tray\()" \
 		"$index_js" | head -1)
 	if [[ -z $tray_var ]]; then
 		echo 'Failed to extract tray variable name' >&2
@@ -923,9 +927,22 @@ patch_menu_bar_default() {
 }
 
 patch_quick_window() {
-	if ! grep -q 'e.blur(),e.hide()' app.asar.contents/.vite/build/index.js; then
-		sed -i 's/e.hide()/e.blur(),e.hide()/' app.asar.contents/.vite/build/index.js
+	local index_js='app.asar.contents/.vite/build/index.js'
+	# Prepend blur() before a STANDALONE e.hide() (quick-entry submit fix).
+	# Anchor on a statement boundary ([;{>]) so the replacement can never land
+	# inside an expression like `const r=await e.hide()` — splicing a comma there
+	# would create a second, initializer-less const declarator and break the
+	# whole bundle (SyntaxError: Missing initializer in const declaration -> the
+	# main process throws on load and no window is ever created). On bundles
+	# where the quick-entry pattern has drifted away (e.g. 1.11187.x, where the
+	# only e.hide() is unrelated origin-validation code) this safely no-ops.
+	if grep -q 'e.blur(),e.hide()' "$index_js"; then
+		echo '  Quick-window blur already patched'
+	elif grep -qE '[;{>]e\.hide\(\)' "$index_js"; then
+		sed -i 's/\([;{>]\)e\.hide()/\1e.blur(),e.hide()/g' "$index_js"
 		echo 'Added blur() call to fix quick window submit issue'
+	else
+		echo '  Quick-window standalone e.hide() not found - skipping blur patch'
 	fi
 }
 
