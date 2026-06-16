@@ -1037,55 +1037,71 @@ if (code !== origCode) {
         }
     }
 }
+// Patch 1b (Claude 1.13576.0+): the crashing platform gate was refactored
+// upstream into graceful per-capability availability checks of the form
+//   process.platform!=="darwin"&&process.platform!=="win32"?{status:"unavailable"}:...
+// (e.g. f3i -> "quietPenguin"/Cowork availability, p3i). No single startup
+// gate or platform throw remains, so allow Linux through each availability
+// check instead. The trailing ?{status:"unavailable"} keeps this targeted to
+// real capability gates (and makes the replacement idempotent).
+const availGateRe = /(process\.platform!=="darwin"&&process\.platform!=="win32")(\?\{status:"unavailable"\})/g;
+let availGateCount = 0;
+code = code.replace(availGateRe, (m, gate, tail) => {
+    availGateCount++;
+    return gate + '&&process.platform!=="linux"' + tail;
+});
+if (availGateCount > 0) {
+    console.log(`  Patched ${availGateCount} availability platform gate(s) to allow Linux (Cowork)`);
+    patchCount++;
+}
 if (code === origCode) {
-    console.error('FATAL: Failed to patch cowork platform gate for Linux.');
-    console.error('The app will crash at startup without this patch.');
-    console.error('The platform check pattern or nearby anchor text may have changed.');
-    process.exit(1);
+    // Neither the legacy crashing gate nor the availability gates matched.
+    // Modern Claude builds no longer hard-crash on unknown platforms (they
+    // return graceful status objects), so treat this as a non-fatal drift
+    // warning rather than aborting the whole build.
+    console.log('  WARNING: no platform gate found to patch (gate structure may have changed again)');
 }
 
 // ============================================================
 // Patch 2: Module loading - use TypeScript VM client on Linux
-// Anchor: unique string "vmClient (TypeScript)"
-// Extracts the win32 platform variable, adds Linux OR condition
+// Anchor: stable string "vmClient (TypeScript)"
+// (Claude 1.13576.0+) The old WIN32VAR?"vmClient (TypeScript)" ternary was
+// refactored into a loader of the form:
+//   function d_t(){return tu()?(...,sG={vm:qti},...):null}
+// where the gate tu() resolves windowsStore/appPath and returns false on
+// Linux, so the module never loads. Allow Linux through the loader's gate
+// call. The minified loader/gate names (d_t/tu) change between releases, so
+// anchor on the stable log string and walk back to the enclosing
+// `function NAME(){return GATE()?` to stay version-robust.
 // ============================================================
-const vmClientLogMatch = code.match(/(\w+)(\s*\?\s*"vmClient \(TypeScript\)")/);
-if (vmClientLogMatch) {
-    const win32Var = vmClientLogMatch[1];
-
-    // 2a: Patch the log/description line
-    // FROM: WIN32VAR?"vmClient (TypeScript)"
-    // TO:   (WIN32VAR||process.platform==="linux")?"vmClient (TypeScript)"
-    // Use negative lookbehind to avoid double-patching
-    const logRe = new RegExp(
-        '(?<!\\|\\|process\\.platform==="linux"\\))' +
-        win32Var.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-        '(\\s*\\?\\s*"vmClient \\(TypeScript\\)")'
-    );
-    if (logRe.test(code)) {
-        code = code.replace(logRe,
-            '(' + win32Var + '||process.platform==="linux")$1');
-        console.log('  Patched VM client log check for Linux');
-        patchCount++;
+const vmStr = '"vmClient (TypeScript)"';
+const vmStrIdx = code.indexOf(vmStr);
+if (vmStrIdx !== -1) {
+    const backRegion = code.substring(Math.max(0, vmStrIdx - 400), vmStrIdx);
+    const loaderRe = /function (\w+)\(\)\{return (\w+)\(\)\?/g;
+    let lm, lastLoader = null;
+    while ((lm = loaderRe.exec(backRegion)) !== null) {
+        lastLoader = lm;
     }
-
-    // 2b: Patch the actual module assignment
-    // Beautified: WIN32VAR ? (df = { vm: bYe }) : (df = ...)
-    // Minified:   WIN32VAR?df={vm:bYe}:df=...
-    // Handle both: outer parens are optional in minified code
-    const assignRe = new RegExp(
-        '(?<!\\|\\|process\\.platform==="linux"\\)?)' +
-        win32Var.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
-        '(\\s*\\?\\s*\\(?\\s*\\w+\\s*=\\s*\\{\\s*vm\\s*:\\s*\\w+\\s*\\}\\s*\\)?)'
-    );
-    if (assignRe.test(code)) {
-        code = code.replace(assignRe,
-            '(' + win32Var + '||process.platform==="linux")$1');
-        console.log('  Patched VM module assignment for Linux');
-        patchCount++;
+    if (lastLoader) {
+        const loaderFn = lastLoader[1];
+        const gateFn = lastLoader[2];
+        const orig = `function ${loaderFn}(){return ${gateFn}()?`;
+        const repl = `function ${loaderFn}(){return (${gateFn}()||process.platform==="linux")?`;
+        if (code.includes(repl)) {
+            console.log('  VM client loader gate already patched for Linux');
+        } else if (code.includes(orig)) {
+            code = code.replace(orig, repl);
+            console.log(`  Patched vmClient (TypeScript) loader gate ${loaderFn}/${gateFn} for Linux`);
+            patchCount++;
+        } else {
+            console.log('  WARNING: vmClient loader gate shape changed; not patched');
+        }
+    } else {
+        console.log('  WARNING: Could not find vmClient loader function for module loading patch');
     }
 } else {
-    console.log('  WARNING: Could not find vmClient variable for module loading patch');
+    console.log('  WARNING: Could not find vmClient (TypeScript) anchor for module loading patch');
 }
 
 // ============================================================
@@ -1200,9 +1216,14 @@ if (serviceErrorIdx !== -1) {
     const newServiceErrorIdx = code.indexOf(serviceErrorStr);
     const searchEnd = Math.min(code.length, newServiceErrorIdx + 300);
     const searchRegion = code.substring(newServiceErrorIdx, searchEnd);
+    // (Claude 1.13576.0+) the inline `await new Promise(r=>setTimeout(r,N))`
+    // retry delay was refactored into a helper call `await fa(xti)`. Prefer the
+    // old inline form for back-compat, else match the first awaited helper call
+    // (with an argument) after the service-error string — that is the retry
+    // delay we inject the auto-launch in front of.
     const retryMatch = searchRegion.match(
         /await new Promise\((\w+)=>\s*setTimeout\(\1,\s*(\w+)\)\)/
-    );
+    ) || searchRegion.match(/await (\w+)\((\w+)\)/);
     if (retryMatch) {
         const retryStr = retryMatch[0];
         const retryOffset = searchRegion.indexOf(retryStr);
@@ -1227,7 +1248,7 @@ if (serviceErrorIdx !== -1) {
         }
         const svcLaunchedGuard = retryFuncName
             ? retryFuncName + '._svcLaunched'
-            : '_globalSvcLaunched';
+            : 'globalThis._coworkSvcLaunched';
         const autoLaunch =
             'process.platform==="linux"&&!' + svcLaunchedGuard + '&&(' + svcLaunchedGuard + '=true,' +
             '(()=>{try{' +
