@@ -39,17 +39,8 @@ detect_display_backend() {
 		desktop="${desktop,,}"
 
 		if [[ -n "${NIRI_SOCKET:-}" || "$desktop" == *niri* ]]; then
-			# Niri ships rootless xwayland-satellite: when it runs, DISPLAY
-			# points at a live X server and XWayland maps windows correctly.
-			# Native Wayland under Niri starts the renderer but never maps a
-			# visible surface (same failure Codex avoids with --x11), so only
-			# fall back to native Wayland when no XWayland is available.
-			if [[ -n "${DISPLAY:-}" ]]; then
-				log_message "Niri + XWayland detected (DISPLAY=$DISPLAY) - using X11/XWayland"
-			else
-				log_message "Niri without XWayland - forcing native Wayland"
-				use_x11_on_wayland=false
-			fi
+			log_message "Niri detected - forcing native Wayland"
+			use_x11_on_wayland=false
 		fi
 	fi
 }

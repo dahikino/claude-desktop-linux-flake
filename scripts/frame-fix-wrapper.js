@@ -1,14 +1,7 @@
 // Inject frame fix before main app loads
 const Module = require('module');
 const path = require('path');
-// Hook Module._load (not Module.prototype.require): in Electron the main
-// bundle's `require("electron")` is resolved at the _load chokepoint, and
-// newer vite/esbuild bundles route requires through paths that don't all hit
-// Module.prototype.require — so the require-level hook silently missed the new
-// app's BrowserWindow (window created frameless => never mapped/visible).
-// _load is the single function every require funnels through, so it catches
-// them all (verified: the require hook missed 1.13576.0; _load catches it).
-const originalLoad = Module._load;
+const originalRequire = Module.prototype.require;
 
 console.log('[Frame Fix] Wrapper loaded');
 
@@ -87,9 +80,8 @@ let PatchedBrowserWindow = null;
 let patchedSetApplicationMenu = null;
 let electronModule = null;
 
-Module._load = function(request, parent, isMain) {
-  const id = request;
-  const result = originalLoad.apply(this, arguments);
+Module.prototype.require = function(id) {
+  const result = originalRequire.apply(this, arguments);
 
   if (id === 'electron') {
     // Build patches once from the real electron module
@@ -349,48 +341,6 @@ Module._load = function(request, parent, isMain) {
         registerQuitShortcut();
       } else {
         result.app.once('ready', registerQuitShortcut);
-      }
-
-      // Interception-independent visibility fix. The 1.13576.0 bundle creates
-      // its BrowserWindow without going through our subclass (its require()
-      // path bypasses both the Module.prototype.require and Module._load
-      // hooks), so the per-window Linux fixes never run and the main window
-      // never maps a visible surface under Niri (renderers spawn, but nothing
-      // shows). `app` is a singleton we DO have a handle to here, so hook
-      // browser-window-created and force the top-level window visible. Logs
-      // state so a still-missing window reveals an off-screen/placement issue.
-      if (process.platform === 'linux') {
-        const ensureVisible = (win, tag) => {
-          try {
-            if (win.isDestroyed()) return;
-            const vis = win.isVisible();
-            const b = win.getBounds();
-            console.log(`[Frame Fix] bwc(${tag}): visible=${vis} bounds=${b.x},${b.y} ${b.width}x${b.height}`);
-            if (!vis) win.show();
-            win.center();
-            win.moveTop();
-            win.focus();
-            // Jiggle to force the compositor to map/redraw the surface.
-            const [w, h] = win.getSize();
-            win.setSize(w + 1, h);
-            setTimeout(() => { if (!win.isDestroyed()) win.setSize(w, h); }, 50);
-          } catch (e) {
-            console.log('[Frame Fix] ensureVisible error:', e.message);
-          }
-        };
-        result.app.on('browser-window-created', (event, win) => {
-          try {
-            // Skip popups/child windows; only force the main top-level window.
-            if (win.getParentWindow && win.getParentWindow()) return;
-            console.log('[Frame Fix] browser-window-created (top-level)');
-            win.once('ready-to-show', () => ensureVisible(win, 'ready-to-show'));
-            // Fallback: ready-to-show may have already fired or never fire.
-            setTimeout(() => ensureVisible(win, 'timeout-2s'), 2000);
-          } catch (e) {
-            console.log('[Frame Fix] browser-window-created handler error:', e.message);
-          }
-        });
-        console.log('[Frame Fix] browser-window-created visibility hook armed');
       }
 
       console.log('[Frame Fix] Patches built successfully');
