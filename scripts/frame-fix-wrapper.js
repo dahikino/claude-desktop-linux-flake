@@ -1,7 +1,14 @@
 // Inject frame fix before main app loads
 const Module = require('module');
 const path = require('path');
-const originalRequire = Module.prototype.require;
+// Hook Module._load (not Module.prototype.require): in Electron the main
+// bundle's `require("electron")` is resolved at the _load chokepoint, and
+// newer vite/esbuild bundles route requires through paths that don't all hit
+// Module.prototype.require — so the require-level hook silently missed the new
+// app's BrowserWindow (window created frameless => never mapped/visible).
+// _load is the single function every require funnels through, so it catches
+// them all (verified: the require hook missed 1.13576.0; _load catches it).
+const originalLoad = Module._load;
 
 console.log('[Frame Fix] Wrapper loaded');
 
@@ -80,8 +87,9 @@ let PatchedBrowserWindow = null;
 let patchedSetApplicationMenu = null;
 let electronModule = null;
 
-Module.prototype.require = function(id) {
-  const result = originalRequire.apply(this, arguments);
+Module._load = function(request, parent, isMain) {
+  const id = request;
+  const result = originalLoad.apply(this, arguments);
 
   if (id === 'electron') {
     // Build patches once from the real electron module
