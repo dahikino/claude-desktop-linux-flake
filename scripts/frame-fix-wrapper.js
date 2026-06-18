@@ -351,6 +351,48 @@ Module._load = function(request, parent, isMain) {
         result.app.once('ready', registerQuitShortcut);
       }
 
+      // Interception-independent visibility fix. The 1.13576.0 bundle creates
+      // its BrowserWindow without going through our subclass (its require()
+      // path bypasses both the Module.prototype.require and Module._load
+      // hooks), so the per-window Linux fixes never run and the main window
+      // never maps a visible surface under Niri (renderers spawn, but nothing
+      // shows). `app` is a singleton we DO have a handle to here, so hook
+      // browser-window-created and force the top-level window visible. Logs
+      // state so a still-missing window reveals an off-screen/placement issue.
+      if (process.platform === 'linux') {
+        const ensureVisible = (win, tag) => {
+          try {
+            if (win.isDestroyed()) return;
+            const vis = win.isVisible();
+            const b = win.getBounds();
+            console.log(`[Frame Fix] bwc(${tag}): visible=${vis} bounds=${b.x},${b.y} ${b.width}x${b.height}`);
+            if (!vis) win.show();
+            win.center();
+            win.moveTop();
+            win.focus();
+            // Jiggle to force the compositor to map/redraw the surface.
+            const [w, h] = win.getSize();
+            win.setSize(w + 1, h);
+            setTimeout(() => { if (!win.isDestroyed()) win.setSize(w, h); }, 50);
+          } catch (e) {
+            console.log('[Frame Fix] ensureVisible error:', e.message);
+          }
+        };
+        result.app.on('browser-window-created', (event, win) => {
+          try {
+            // Skip popups/child windows; only force the main top-level window.
+            if (win.getParentWindow && win.getParentWindow()) return;
+            console.log('[Frame Fix] browser-window-created (top-level)');
+            win.once('ready-to-show', () => ensureVisible(win, 'ready-to-show'));
+            // Fallback: ready-to-show may have already fired or never fire.
+            setTimeout(() => ensureVisible(win, 'timeout-2s'), 2000);
+          } catch (e) {
+            console.log('[Frame Fix] browser-window-created handler error:', e.message);
+          }
+        });
+        console.log('[Frame Fix] browser-window-created visibility hook armed');
+      }
+
       console.log('[Frame Fix] Patches built successfully');
     }
 
