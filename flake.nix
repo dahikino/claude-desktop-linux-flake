@@ -25,7 +25,7 @@
           node-pty = pkgs.callPackage ./pkgs/node-pty.nix { };
 
           claude-desktop = pkgs.callPackage ./pkgs/claude-desktop.nix {
-            electron = pkgs.electron_40;
+            electron = pkgs.electron_42;
             inherit node-pty;
           };
 

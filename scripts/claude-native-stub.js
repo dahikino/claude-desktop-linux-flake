@@ -42,6 +42,8 @@ class AuthRequest {
 
 module.exports = {
   getWindowsVersion: () => "10.0.0",
+  getWindowsElevationType: () => "default",
+  readRegistryValues: () => [],
   setWindowEffect: () => {},
   removeWindowEffect: () => {},
 
