@@ -1468,6 +1468,15 @@ code = code.replace(osHeaderRe, (match, headerVar) => {
     osHeaderMatches++;
     return `${headerVar}.set("anthropic-client-os-platform","win32")`;
 });
+// Claude 1.17377.2+ builds the header list as an array-of-tuples instead of a
+// Map .set() call: ["anthropic-client-os-platform", <expr>] (e.g. ho.platform).
+// Rewrite the tuple value to "win32" as well. Anchored on the literal header
+// name so the adjacent os-version tuple is left untouched.
+const osHeaderTupleRe = /(\["anthropic-client-os-platform",\s*)[\w.$()]+(\])/g;
+code = code.replace(osHeaderTupleRe, (match, pre, post) => {
+    osHeaderMatches++;
+    return `${pre}"win32"${post}`;
+});
 if (osHeaderMatches > 0) {
     console.log(`  Patched anthropic-client-os-platform to win32 (${osHeaderMatches} call site${osHeaderMatches > 1 ? 's' : ''})`);
     patchCount++;
