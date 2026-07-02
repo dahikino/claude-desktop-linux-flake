@@ -1164,10 +1164,47 @@ if (!code.includes('"linux":{') && !code.includes("'linux':{") &&
 }
 
 // ============================================================
-// Patch 5: MSIX check bypass for Linux
-// The fz() function checks: if(t==="win32"&&!ga()) for MSIX
-// This is already gated to win32, so no change needed.
+// Patch 5: MSIX and Windows build checks only apply on Windows
+// Claude 1.13576.0 evaluates the Cowork Windows bundle path on Linux, then
+// unconditionally runs the MSIX detector and Windows build detector. On Linux
+// this reports msix_required or unsupported_os_version before the Linux backend
+// can run. Keep those checks for real Windows installs and skip them elsewhere.
 // ============================================================
+{
+    const msixGateRe =
+        /if\(!(\w+)\(\)\)return\{status:"unsupported",reason:(\w+)\(\)\.formatMessage\(\{defaultMessage:"Cowork requires Claude Desktop be installed with our modern installer",id:"[^"]+"\}\),unsupportedCode:"msix_required"\};/;
+    const msixGateMatch = code.match(msixGateRe);
+    if (msixGateMatch) {
+        code = code.replace(
+            msixGateRe,
+            (match, detector) => match.replace(
+                `if(!${detector}())`,
+                `if(process.platform==="win32"&&!${detector}())`
+            )
+        );
+        console.log('  Patched MSIX installer gate to apply only on win32');
+        patchCount++;
+    } else if (code.includes('unsupportedCode:"msix_required"')) {
+        console.log('  WARNING: Found msix_required but MSIX gate shape changed');
+    } else {
+        console.log('  MSIX installer gate not present');
+    }
+
+    const windowsBuildGateRe =
+        /const (\w+)=19041;\{const\{patch:(\w+)\}=(\w+)\(\);if\(\2===void 0\|\|\2<\1\)return\{status:"unsupported",reason:(\w+)\(\)\.formatMessage\(\{defaultMessage:"Cowork requires Windows 10 build 2004 or later\. Update your operating system to use this feature\.",id:"[^"]+"\}\),unsupportedCode:"unsupported_os_version"\}\}/;
+    if (windowsBuildGateRe.test(code)) {
+        code = code.replace(
+            windowsBuildGateRe,
+            match => `if(process.platform==="win32"){${match}}`
+        );
+        console.log('  Patched Windows build gate to apply only on win32');
+        patchCount++;
+    } else if (code.includes('unsupportedCode:"unsupported_os_version"')) {
+        console.log('  WARNING: Found unsupported_os_version but Windows build gate shape changed');
+    } else {
+        console.log('  Windows build gate not present');
+    }
+}
 
 // ============================================================
 // Patch 6: Auto-launch service daemon on first connection attempt

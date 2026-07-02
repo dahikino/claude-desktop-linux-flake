@@ -1,7 +1,10 @@
 // Inject frame fix before main app loads
 const Module = require('module');
 const path = require('path');
-const originalRequire = Module.prototype.require;
+// Hook Module._load rather than Module.prototype.require. Newer Electron/Vite
+// bundles do not route every require("electron") through prototype.require,
+// but they all pass through _load.
+const originalLoad = Module._load;
 
 console.log('[Frame Fix] Wrapper loaded');
 
@@ -80,8 +83,9 @@ let PatchedBrowserWindow = null;
 let patchedSetApplicationMenu = null;
 let electronModule = null;
 
-Module.prototype.require = function(id) {
-  const result = originalRequire.apply(this, arguments);
+Module._load = function(request, parent, isMain) {
+  const id = request;
+  const result = originalLoad.apply(this, arguments);
 
   if (id === 'electron') {
     // Build patches once from the real electron module
@@ -341,6 +345,56 @@ Module.prototype.require = function(id) {
         registerQuitShortcut();
       } else {
         result.app.once('ready', registerQuitShortcut);
+      }
+
+      // Keep startup visibility fixes scoped to the first top-level window.
+      // Claude creates an auxiliary 800x600 top-level window for internal
+      // surfaces. It is intentionally hidden; forcing every top-level window
+      // visible maps that empty menu-only window under Niri/XWayland.
+      if (process.platform === 'linux') {
+        let primaryWindow = null;
+        const acceptPrimaryWindow = (win) => {
+          if (win.getParentWindow && win.getParentWindow()) return false;
+          if (!primaryWindow || primaryWindow.isDestroyed()) {
+            primaryWindow = win;
+            return true;
+          }
+          return win === primaryWindow;
+        };
+        const ensureVisible = (win, tag) => {
+          try {
+            if (win.isDestroyed()) return;
+            if (win !== primaryWindow) return;
+            const visible = win.isVisible();
+            const bounds = win.getBounds();
+            console.log(`[Frame Fix] primary(${tag}): visible=${visible} bounds=${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}`);
+            if (!visible) win.show();
+            win.center();
+            win.moveTop();
+            win.focus();
+            const [w, h] = win.getSize();
+            win.setSize(w + 1, h);
+            setTimeout(() => {
+              if (!win.isDestroyed()) win.setSize(w, h);
+            }, 50);
+          } catch (e) {
+            console.log('[Frame Fix] ensureVisible error:', e.message);
+          }
+        };
+        result.app.on('browser-window-created', (event, win) => {
+          try {
+            if (!acceptPrimaryWindow(win)) {
+              console.log('[Frame Fix] skipping secondary top-level window');
+              return;
+            }
+            console.log('[Frame Fix] primary top-level window detected');
+            win.once('ready-to-show', () => ensureVisible(win, 'ready-to-show'));
+            setTimeout(() => ensureVisible(win, 'timeout-2s'), 2000);
+          } catch (e) {
+            console.log('[Frame Fix] browser-window-created handler error:', e.message);
+          }
+        });
+        console.log('[Frame Fix] primary-window visibility hook armed');
       }
 
       console.log('[Frame Fix] Patches built successfully');
