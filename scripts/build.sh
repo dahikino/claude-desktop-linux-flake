@@ -691,6 +691,9 @@ console.log('Updated package.json: main entry and node-pty dependency');
 	# Patch title bar detection
 	patch_titlebar_detection
 
+	# Resolve which file holds the main-process code (code-split since 1.19367.0)
+	resolve_main_bundle
+
 	# Extract electron module variable name for tray patches
 	extract_electron_variable
 
@@ -759,9 +762,33 @@ patch_titlebar_detection() {
 	echo '##############################################################'
 }
 
+resolve_main_bundle() {
+	# Since 1.19367.0 Claude code-splits the main process: `.vite/build/index.js`
+	# is a ~800-byte stub that require()s a content-hashed chunk
+	# (`index.chunk-<hash>.js`) holding the tray/menu/nativeTheme/os-platform/
+	# cowork code. Older builds shipped that code directly in index.js. Detect the
+	# real bundle by CONTENT (the tray menu IPC handler), not by filename, so the
+	# content hash — which changes every release — never has to be hardcoded.
+	echo 'Resolving main-process bundle...'
+	local build_dir='app.asar.contents/.vite/build'
+	local f
+	for f in "$build_dir/index.js" "$build_dir"/index.chunk-*.js; do
+		[[ -f $f ]] || continue
+		if grep -qF 'on("menuBarEnabled",()=>{' "$f"; then
+			main_bundle="$f"
+			echo "  Main-process bundle: ${f#"$build_dir"/}"
+			echo '##############################################################'
+			return 0
+		fi
+	done
+	echo 'Failed to resolve main-process bundle (no file with the tray handler)' >&2
+	cd "$project_root" || exit 1
+	exit 1
+}
+
 extract_electron_variable() {
 	echo 'Extracting electron module variable name...'
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 
 	electron_var=$(grep -oP '\$?\w+(?=\s*=\s*require\("electron"\))' \
 		"$index_js" | head -1)
@@ -781,7 +808,7 @@ extract_electron_variable() {
 
 fix_native_theme_references() {
 	echo 'Fixing incorrect nativeTheme variable references...'
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 
 	local wrong_refs
 	mapfile -t wrong_refs < <(
@@ -809,7 +836,7 @@ fix_native_theme_references() {
 
 patch_tray_menu_handler() {
 	echo 'Patching tray menu handler...'
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 
 	local js_ident='[$A-Za-z_][$0-9A-Za-z_]*'
 	local tray_func tray_func_re tray_var tray_var_re first_const
@@ -885,7 +912,7 @@ patch_tray_menu_handler() {
 
 patch_tray_icon_selection() {
 	echo 'Patching tray icon selection for Linux visibility...'
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 	local dark_check="${electron_var_re}.nativeTheme.shouldUseDarkColors"
 
 	if grep -qP ':\$?\w+="TrayIconTemplate\.png"' "$index_js"; then
@@ -901,7 +928,7 @@ patch_tray_icon_selection() {
 
 patch_menu_bar_default() {
 	echo 'Patching menuBarEnabled to default to true when unset...'
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 
 	local menu_bar_var
 	menu_bar_var=$(grep -oP \
@@ -927,7 +954,7 @@ patch_menu_bar_default() {
 }
 
 patch_quick_window() {
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 	# Prepend blur() before a STANDALONE e.hide() (quick-entry submit fix).
 	# Anchor on a statement boundary ([;{>]) so the replacement can never land
 	# inside an expression like `const r=await e.hide()` — splicing a comma there
@@ -947,7 +974,7 @@ patch_quick_window() {
 }
 
 patch_linux_claude_code() {
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 	if grep -q 'process.platform==="linux".*linux-arm64.*linux-x64' "$index_js"; then
 		echo 'Linux claude code binary support already present'
 		return
@@ -969,7 +996,7 @@ patch_linux_claude_code() {
 
 patch_cowork_linux() {
 	echo 'Patching Cowork mode for Linux...'
-	local index_js='app.asar.contents/.vite/build/index.js'
+	local index_js="$main_bundle"
 
 	if ! grep -q 'vmClient (TypeScript)' "$index_js"; then
 		echo '  Cowork mode code not found in this version, skipping'
