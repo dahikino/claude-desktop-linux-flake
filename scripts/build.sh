@@ -723,6 +723,54 @@ console.log('Updated package.json: main entry and node-pty dependency');
 	cp "$source_dir/scripts/cowork-vm-service.js" \
 		app.asar.contents/cowork-vm-service.js || exit 1
 	echo 'Cowork VM service daemon installed'
+
+	verify_patched_syntax
+}
+
+# Build-time syntax gate over every patched main-process chunk.
+#
+# WHY: a patch that corrupts the bundle still BUILDS green — nothing here parses
+# the JS — and only dies at runtime with a blank app. That shipped twice:
+# `patch_quick_window` splicing into a const declarator, and the `_trayStartTime`
+# initialiser landing inside a comma expression on 1.25927.0 ("SyntaxError:
+# Unexpected identifier '_trayStartTime'", app would not launch). The cowork
+# patches were dry-run checked by hand at the time; the sed-based tray patches
+# were not, and that is exactly the gap this closes. Fail the build instead.
+#
+# Syntax only: node --check cannot tell us a patch is semantically wrong, just
+# that the file still parses. That is the cheap half, and it is the half that
+# has actually broken.
+verify_patched_syntax() {
+	echo 'Verifying patched bundle syntax (node --check)...'
+	local f rc=0 checked=0
+	local -a targets=()
+	# The tray group, patched by the seds above.
+	[[ -n ${main_bundle:-} && -f ${main_bundle:-} ]] && targets+=("$main_bundle")
+	# Plus the exact set the cowork pass rewrote, as reported by the node script.
+	if [[ -n ${cowork_changed_list:-} && -f ${cowork_changed_list:-} ]]; then
+		local line
+		while IFS= read -r line; do
+			[[ -n $line && -f $line ]] && targets+=("$line")
+		done <"$cowork_changed_list"
+	fi
+	# Deduplicate: main_bundle is usually in the cowork set too.
+	mapfile -t targets < <(printf '%s\n' "${targets[@]}" | sort -u)
+	for f in "${targets[@]}"; do
+		[[ -f $f ]] || continue
+		checked=$((checked + 1))
+		if ! node --check "$f" 2>/dev/null; then
+			echo "  BROKEN: ${f#"$build_dir"/}" >&2
+			node --check "$f" 2>&1 | head -3 >&2
+			rc=1
+		fi
+	done
+	if [[ $rc -ne 0 ]]; then
+		echo 'Patched bundle does not parse — refusing to package a dead app.' >&2
+		cd "$project_root" || exit 1
+		exit 1
+	fi
+	echo "  $checked patched chunk(s) parse cleanly"
+	echo '##############################################################'
 }
 
 patch_titlebar_detection() {
@@ -937,11 +985,23 @@ patch_tray_menu_handler() {
 	# Skip tray updates during startup (3 second window)
 	echo 'Patching nativeTheme handler for startup delay...'
 	if ! grep -q '_trayStartTime' "$index_js"; then
+		# EXPRESSION, not a statement. In 1.25927.0 these handlers are chained
+		# inside a comma expression (`…}),L.nativeTheme.on(`updated`,…)`), where
+		# a `let` declaration is a hard SyntaxError — it shipped once as
+		# "Unexpected identifier '_trayStartTime'" and the app would not start.
+		# An assignment to globalThis is valid both there and at statement
+		# position, so it stays safe whichever shape upstream emits.
 		sed -i -E \
-			"s/(${electron_var_re}\.nativeTheme\.on\(\s*${Q}updated${Q}\s*,\s*\(\)\s*=>\s*\{)/let _trayStartTime=Date.now();\1/g" \
+			"s/(${electron_var_re}\.nativeTheme\.on\(\s*${Q}updated${Q}\s*,\s*\(\)\s*=>\s*\{)/(globalThis._trayStartTime=Date.now()),\1/g" \
 			"$index_js"
+		# Callee may be dotted now (`(g.c(),fd(),…)` where older bundles had a
+		# bare `(c(),fd(),…)`), otherwise the guard is never actually applied
+		# and the variable above ends up dead.
+		# POSIX ERE: `\w` is NOT a word class INSIDE a bracket expression —
+		# `[\w.]` would match a literal backslash, `w` or `.` and silently fail
+		# to match `g.c`. Use the character class, not the escape.
 		sed -i -E \
-			"s/\((\w+\([^)]*\))\s*,\s*${tray_func_re}\(\)\s*,/(\1,Date.now()-_trayStartTime>3e3\&\&${tray_func}(),/g" \
+			"s/\(([[:alnum:]_.]+\([^)]*\))\s*,\s*${tray_func_re}\(\)\s*,/(\1,Date.now()-globalThis._trayStartTime>3e3\&\&${tray_func}(),/g" \
 			"$index_js"
 		echo '  Added startup delay check (3 second window)'
 	fi
@@ -1068,10 +1128,13 @@ patch_cowork_linux() {
 	# All complex patches are done via node to avoid shell escaping issues
 	# with minified JavaScript. Uses unique string anchors and dynamic
 	# variable extraction to be version-agnostic per CLAUDE.md guidelines.
+	cowork_changed_list="$(mktemp -t cowork-changed-XXXXXX)"
 	if ! INDEX_LIST="$(main_chunks)" SVC_PATH="cowork-vm-service.js" \
+		CHANGED_LIST="$cowork_changed_list" \
 		node << 'COWORK_PATCH'
 const fs = require('fs');
 const files = (process.env.INDEX_LIST || '').split('\n').filter(Boolean);
+const changedFiles = [];
 let patchCount = 0;
 
 // Since 1.25927.0 the minifier emits template literals, so `"linux"` in one
@@ -1682,7 +1745,18 @@ if (osHeaderMatches > 0) {
 // chunk is read and left byte-identical.
 if (code !== fileOrig) {
     fs.writeFileSync(indexJs, code);
+    changedFiles.push(indexJs);
 }
+}
+
+// Hand the exact set of rewritten files to the syntax gate. Grepping for
+// marker strings instead would undercount: it misses any chunk whose patch
+// left no distinctive literal behind.
+if (process.env.CHANGED_LIST) {
+    // Trailing newline is REQUIRED: the reader is a `while IFS= read -r`
+    // loop, which silently drops the final entry of a file that does not end
+    // in one — the gate then reports one chunk fewer than it verified.
+    fs.writeFileSync(process.env.CHANGED_LIST, changedFiles.join('\n') + '\n');
 }
 
 // A sub-patch is only in trouble when it matched in NO file. Before the
