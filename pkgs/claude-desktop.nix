@@ -13,6 +13,7 @@
   bash,
   getent,
   node-pty,
+  perl,
 }:
 let
   pname = "claude-desktop";
@@ -75,6 +76,11 @@ stdenvNoCC.mkDerivation {
     bash
     python3
     getent
+    # build.sh s'appuie sur perl -0pi pour les substitutions multiligne à
+    # backreferences (délai DBus du tray, fallback getHostPlatform). Absent du
+    # sandbox jusqu'ici : le délai DBus était silencieusement sauté en 1.32885.1
+    # (perl: command not found), alors que le même code passait hors sandbox.
+    perl
   ];
 
   # The exe is not a standard archive — use manual unpack
