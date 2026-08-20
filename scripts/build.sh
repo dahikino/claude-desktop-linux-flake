@@ -828,8 +828,12 @@ build_dir='app.asar.contents/.vite/build'
 # there now.
 main_chunks() {
 	local f
-	for f in "$build_dir"/index.js "$build_dir"/index.chunk-*.js \
-		"$build_dir"/index2.chunk-*.js; do
+	# index.pre.js : entrée main de 1.32885.1 (package.json "main"), qui a
+	# remplacé index.js. Les deux globs chunk couvrent le reste ; les fichiers
+	# nommés (coworkArtifact.js, buddy.js…) sont exclus à dessein — des ancres
+	# génériques (win32, cowork…) y matcheraient le MAUVAIS fichier.
+	for f in "$build_dir"/index.js "$build_dir"/index.pre.js \
+		"$build_dir"/index.chunk-*.js "$build_dir"/index2.chunk-*.js; do
 		[[ -f $f ]] && printf '%s\n' "$f"
 	done
 }
@@ -861,7 +865,7 @@ resolve_main_bundle() {
 	# an index2 chunk. `main_bundle` is now only the TRAY group; anything else
 	# resolves its own file through find_chunk.
 	echo 'Resolving main-process bundle...'
-	if main_bundle=$(find_chunk "on\(${Q}menuBarEnabled${Q},\(\)=>\{"); then
+	if main_bundle=$(find_chunk "on\(${Q}menuBarEnabled${Q},\(?\(\)=>\{"); then
 		echo "  Tray/main bundle: ${main_bundle#"$build_dir"/}"
 		echo '##############################################################'
 		return 0
@@ -925,8 +929,10 @@ patch_tray_menu_handler() {
 
 	local js_ident='[$A-Za-z_][$0-9A-Za-z_]*'
 	local tray_func tray_func_re tray_var tray_var_re first_const
+	# 1.32885.1: l'arrow du handler est enveloppée d'une paire de parenthèses
+	# supplémentaire — `on(\`menuBarEnabled\`,(()=>{cvr()}))` — d'où le `\(?`.
 	tray_func=$(grep -oP \
-		"on\(${Q}menuBarEnabled${Q},\(\)=>\{\K${js_ident}(?=\(\)\})" \
+		"on\(${Q}menuBarEnabled${Q},\(?\(\)=>\{\K${js_ident}(?=\(\)\})" \
 		"$index_js" | head -1)
 	if [[ -z $tray_func ]]; then
 		echo 'Failed to extract tray menu function name' >&2
@@ -973,10 +979,22 @@ patch_tray_menu_handler() {
 	fi
 
 	# Add DBus cleanup delay after tray destroy
-	if ! grep -qF "${tray_var}.destroy(),${tray_var}=null,await new Promise" "$index_js"; then
+	if ! grep -qF "await new Promise(r=>setTimeout(r,250))" "$index_js"; then
+		# Forme ≤1.25927.0 : `VAR&&(VAR.destroy(),VAR=null)` n'importe où.
 		sed -i "s/${tray_var_re}&&(${tray_var_re}\.destroy(),${tray_var_re}=null)/${tray_var}\&\&(${tray_var}.destroy(),${tray_var}=null,await new Promise(r=>setTimeout(r,250)))/g" \
 			"$index_js"
-		echo "  Added DBus cleanup delay after $tray_var.destroy()"
+		# Forme 1.32885.1 : le teardown vit dans le catch du rebuild (cvr,
+		# rendue async ci-dessus) — `(J9.destroy(),J9=null,Y9=null),fvr(!0)`.
+		# Le second identifiant et le nom du helper de recréation changent à
+		# chaque release : capturés, jamais codés en dur. Seul CE site est dans
+		# une fonction async ; les destroy de fvr (sync) sont inéligibles.
+		perl -0pi -e "s/\((${tray_var_re}\.destroy\(\),${tray_var_re}=null,(\w+)=null)\),(\w+)\(!0\)/(\$1,await new Promise(r=>setTimeout(r,250))),\$3(!0)/" \
+			"$index_js"
+		if grep -qF "await new Promise(r=>setTimeout(r,250))" "$index_js"; then
+			echo "  Added DBus cleanup delay after $tray_var.destroy()"
+		else
+			echo "  WARNING: no destroy site matched — DBus delay NOT applied"
+		fi
 	fi
 
 	echo 'Tray menu handler patched'
@@ -991,8 +1009,9 @@ patch_tray_menu_handler() {
 		# "Unexpected identifier '_trayStartTime'" and the app would not start.
 		# An assignment to globalThis is valid both there and at statement
 		# position, so it stays safe whichever shape upstream emits.
+		# `\(?` : 1.32885.1 enveloppe aussi cette arrow — `on(\`updated\`,(()=>{`.
 		sed -i -E \
-			"s/(${electron_var_re}\.nativeTheme\.on\(\s*${Q}updated${Q}\s*,\s*\(\)\s*=>\s*\{)/(globalThis._trayStartTime=Date.now()),\1/g" \
+			"s/(${electron_var_re}\.nativeTheme\.on\(\s*${Q}updated${Q}\s*,\s*\(?\(\)\s*=>\s*\{)/(globalThis._trayStartTime=Date.now()),\1/g" \
 			"$index_js"
 		# Callee may be dotted now (`(g.c(),fd(),…)` where older bundles had a
 		# bare `(c(),fd(),…)`), otherwise the guard is never actually applied
@@ -1350,34 +1369,42 @@ if (pipeMatch) {
 // with rootfs.img/vmlinuz entries. NOT on claude.exe.zst: that belongs to the
 // separate Claude CLI manifest, which since 1.25927.0 lives in different chunks
 // entirely (index.chunk-BywqeFiU / index2.chunk-DX4R1ESx) from the VM one.
-const isManifestChunk = re('sha\\s*:\\s*{}[a-f0-9]{40}{}\\s*,\\s*files\\s*:\\s*\\{\\s*unix\\s*:').test(code);
-if (isManifestChunk &&
-    !re('{}linux{}:\\{').test(code) && !code.includes("'linux':{") &&
-    !code.includes('linux:{')) {
-    const shaRe = re('sha\\s*:\\s*{}([a-f0-9]{40}){}');
-    const shaMatch = code.match(shaRe);
-    if (shaMatch) {
-        const shaIdx = code.indexOf(shaMatch[0]);
-        const afterSha = code.indexOf('files', shaIdx);
-        if (afterSha !== -1 && afterSha - shaIdx < 200) {
-            const filesBlock = extractBlock(code, afterSha, '{');
-            if (filesBlock) {
-                const filesEnd = code.indexOf(filesBlock, afterSha)
-                    + filesBlock.length;
-                const insertPos = filesEnd - 1;
-                const linuxEntry = ',linux:{x64:[],arm64:[]}';
-                code = code.substring(0, insertPos) +
-                    linuxEntry + code.substring(insertPos);
-                console.log('  Added empty Linux entries to' +
-                    ` bundle manifest, VM download disabled (${indexJs})`);
-                applied.add('bundle-manifest');
-                patchCount++;
-            }
-        }
+// 1.32885.1 a doublement changé la donne : un champ `publishedAt:\`date\``
+// s'est inséré entre `sha:` et `files:` (l'ancre historique sha→files<200ch
+// ne matche plus), et le chunk porte un HISTORIQUE de manifests — 6 blocs
+// `files:{unix:…,win32:…}`, pas un seul. On ancre donc directement sur
+// `files:{unix:` et on complète CHAQUE bloc dépourvu de clé linux, en
+// itérant de la fin vers le début pour que les insertions ne décalent pas
+// les offsets restants. Garde-fou de scoping : le fichier doit porter les
+// entrées rootfs.img/vmlinuz du manifest VM (jamais le manifest CLI
+// claude.exe.zst, qui vit dans d'autres chunks).
+const isManifestChunk = /rootfs\.img/.test(code) &&
+    re('files\\s*:\\s*\\{\\s*unix\\s*:').test(code);
+if (isManifestChunk) {
+    const filesRe = new RegExp('files\\s*:\\s*\\{\\s*unix\\s*:', 'g');
+    const sites = [];
+    let fm;
+    while ((fm = filesRe.exec(code)) !== null) sites.push(fm.index);
+    let added = 0, present = 0;
+    for (const site of sites.reverse()) {
+        const braceIdx = code.indexOf('{', site);
+        const filesBlock = extractBlock(code, braceIdx, '{');
+        if (!filesBlock) continue;
+        if (/[,{]\s*(['"`]?)linux\1\s*:\s*\{/.test(filesBlock)) { present++; continue; }
+        const insertPos = braceIdx + filesBlock.length - 1;
+        code = code.substring(0, insertPos) +
+            ',linux:{x64:[],arm64:[]}' + code.substring(insertPos);
+        added++;
     }
-} else if (isManifestChunk) {
-    // Manifest already carries a linux key (upstream or a previous run).
-    applied.add('bundle-manifest');
+    if (added > 0) {
+        console.log(`  Added empty Linux entries to ${added} bundle` +
+            ` manifest(s), VM download disabled (${indexJs})`);
+        applied.add('bundle-manifest');
+        patchCount++;
+    } else if (present > 0) {
+        // Manifest already carries a linux key (upstream or a previous run).
+        applied.add('bundle-manifest');
+    }
 }
 
 // ============================================================
