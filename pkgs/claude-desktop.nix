@@ -17,7 +17,7 @@
 }:
 let
   pname = "claude-desktop";
-  version = "1.44121.1";
+  version = "1.46388.2";
 
   # Anthropic stopped serving the Squirrel .exe wrapper at predictable URLs
   # for newer versions; the .nupkg is now hosted directly under
@@ -27,7 +27,7 @@ let
   srcs = {
     x86_64-linux = fetchurl {
       url = "https://downloads.claude.ai/releases/win32/x64/AnthropicClaude-${version}-full.nupkg";
-      hash = "sha256-ZbM9jAdTu2rn+uRY+1szGeM04yWnllEUQEyh77nRuEE=";
+      hash = "sha256-yYK9gYLMHEDvL4uxa4BzMsJ/2+06aaPCK/18OTZU/lg=";
     };
     aarch64-linux = fetchurl {
       url = "https://downloads.claude.ai/releases/win32/arm64/AnthropicClaude-${version}-full.nupkg";
