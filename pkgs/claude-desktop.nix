@@ -14,6 +14,12 @@
   getent,
   node-pty,
   perl,
+  makeWrapper,
+  dconf,
+  librsvg,
+  gsettings-desktop-schemas,
+  gtk3,
+  gtk4,
 }:
 let
   pname = "claude-desktop";
@@ -68,6 +74,7 @@ stdenvNoCC.mkDerivation {
   src = srcExe;
 
   nativeBuildInputs = [
+    makeWrapper
     p7zip
     nodejs
     asar
@@ -180,15 +187,16 @@ stdenvNoCC.mkDerivation {
     done
 
     # Create the electron wrapper — replicates env setup from stock
-    # electron wrapper, then execs our custom binary
-    head -n -1 ${electron}/bin/electron > $electron_tree/electron-wrapper
-    echo "exec \"$electron_tree/electron\" \"\$@\"" >> $electron_tree/electron-wrapper
-    chmod +x $electron_tree/electron-wrapper
-
-    # Update CHROME_DEVEL_SANDBOX to point to our tree's chrome-sandbox
-    substituteInPlace $electron_tree/electron-wrapper \
-      --replace-quiet "${electron}/libexec/electron/chrome-sandbox" \
-        "$electron_tree/chrome-sandbox"
+    # electron wrapper, then execs our custom binary. The stock wrapper is an
+    # ELF since nixpkgs 2026-11, so its env is restated here instead of copied.
+    makeWrapper $electron_tree/electron $electron_tree/electron-wrapper \
+      --prefix GIO_EXTRA_MODULES : "${lib.getLib dconf}/lib/gio/modules" \
+      --set GDK_PIXBUF_MODULE_FILE "${librsvg}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" \
+      --set-default XDG_DATA_DIRS "/usr/local/share/:/usr/share/" \
+      --prefix XDG_DATA_DIRS : "${gsettings-desktop-schemas}/share/gsettings-schemas/${gsettings-desktop-schemas.name}" \
+      --prefix XDG_DATA_DIRS : "${gtk3}/share/gsettings-schemas/${gtk3.name}" \
+      --prefix XDG_DATA_DIRS : "${gtk4}/share/gsettings-schemas/${gtk4.name}" \
+      --set CHROME_DEVEL_SANDBOX "$electron_tree/chrome-sandbox"
 
     #==========================================================================
     # Standard install (icons, desktop file, launcher)
