@@ -18,8 +18,6 @@
         pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
-          # electron_42 is EOL in nixpkgs; drop this once electron below moves on.
-          config.permittedInsecurePackages = [ "electron-42.11.18" ];
         };
       in
       {
@@ -27,7 +25,7 @@
           node-pty = pkgs.callPackage ./pkgs/node-pty.nix { };
 
           claude-desktop = pkgs.callPackage ./pkgs/claude-desktop.nix {
-            electron = pkgs.electron_42;
+            electron = pkgs.electron_43;
             inherit node-pty;
           };
 
